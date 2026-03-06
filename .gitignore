@@ -1,0 +1,14 @@
+# Helm
+*.tgz
+.cr-release-packages/
+.cr-index/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
