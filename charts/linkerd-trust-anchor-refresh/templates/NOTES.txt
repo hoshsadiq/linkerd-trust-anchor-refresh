@@ -9,4 +9,4 @@ To manually trigger a run:
   kubectl create job --from=cronjob/{{ .Release.Name }} {{ .Release.Name }}-manual -n {{ .Release.Namespace }}
 
 To view logs from the last run:
-  kubectl logs -l job-name -n {{ .Release.Namespace }} --tail=100
+  kubectl logs -l job-name -n {{ .Release.Namespace }}
