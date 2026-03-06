@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          annotations:
+            linkerd.io/inject: disabled
+        spec:
+          serviceAccountName: {{ .Release.Name }}
+          restartPolicy: OnFailure
+          containers:
+            - name: refresh
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              env:
+                - name: STAGGER_DELAY_SECONDS
+                  value: "{{ .Values.staggerDelaySeconds }}"
+                - name: ROLLOUT_TIMEOUT_MINUTES
+                  value: "{{ .Values.rolloutTimeoutMinutes }}"
+              command:
+                - /bin/bash
+                - /scripts/refresh-trust-anchor.sh

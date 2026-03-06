@@ -1,0 +1,19 @@
+apiVersion: v2
+name: linkerd-trust-anchor-refresh
+description: Automatically restarts Linkerd-injected pods after trust anchor certificate rotation
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/hoshsadiq/linkerd-trust-anchor-refresh
+sources:
+  - https://github.com/hoshsadiq/linkerd-trust-anchor-refresh
+maintainers:
+  - name: Hosh Sadiq
+    url: https://github.com/hoshsadiq
+keywords:
+  - linkerd
+  - trust-anchor
+  - certificate
+  - rotation
+  - service-mesh
+  - kubernetes

@@ -1,0 +1,13 @@
+# Schedule for the trust anchor refresh check (cron expression)
+schedule: "0 2 * * *"
+
+image:
+  repository: ghcr.io/hoshsadiq/linkerd-trust-anchor-refresh
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Delay in seconds between restarting workloads in different namespaces
+staggerDelaySeconds: 30
+
+# Timeout in minutes for each rollout restart to complete
+rolloutTimeoutMinutes: 10

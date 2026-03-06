@@ -16,6 +16,9 @@ RUN apk add --no-cache \
   && curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl \
   && chmod +x /usr/local/bin/kubectl
 
+COPY scripts/refresh-trust-anchor.sh /scripts/refresh-trust-anchor.sh
+RUN chmod +x /scripts/refresh-trust-anchor.sh
+
 RUN adduser -D -h /home/nonroot nonroot
 
 USER nonroot

@@ -1,0 +1,12 @@
+linkerd-trust-anchor-refresh has been installed.
+
+The CronJob will run on schedule: {{ .Values.schedule }}
+
+To check the CronJob status:
+  kubectl get cronjobs {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+To manually trigger a run:
+  kubectl create job --from=cronjob/{{ .Release.Name }} {{ .Release.Name }}-manual -n {{ .Release.Namespace }}
+
+To view logs from the last run:
+  kubectl logs -l job-name -n {{ .Release.Namespace }} --tail=100
