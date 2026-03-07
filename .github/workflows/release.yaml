@@ -113,9 +113,11 @@ jobs:
 
       - name: Install chart-releaser
         run: |
-          curl -sSLo cr.tar.gz "https://github.com/helm/chart-releaser/releases/latest/download/chart-releaser_linux_amd64.tar.gz"
-          tar -xzf cr.tar.gz cr
-          sudo mv cr /usr/local/bin/cr
+          ending="_$(uname -s | tr A-Z a-z)_$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/').tar.gz"
+          curl -fsSL "https://api.github.com/repos/helm/chart-releaser/releases/latest" |
+            jq --arg ending "$ending" -r '.assets[] | select(.name | endswith($ending)).browser_download_url' |
+            xargs curl -fL -o - |
+            sudo tar -xzf - -C /usr/local/bin cr
 
       - name: Update Helm chart index on GitHub Pages
         run: |
