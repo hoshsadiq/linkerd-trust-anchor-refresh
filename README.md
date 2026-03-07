@@ -19,10 +19,13 @@ This essentially builds on [Hands off Linkerd certificate rotation](https://link
 
 A Kubernetes CronJob runs on a configurable schedule (default: daily at 2am) and:
 
-1. Checks the `linkerd-identity-issuer` secret for the certificate's `notBefore` timestamp
-2. Restarts all deployments in the `linkerd` namespace
-3. Finds Linkerd-injected Deployments, StatefulSets, and DaemonSets whose pods started before the certificate was issued
-4. Finally, it restarts stale workloads
+1. Reads the current trust anchor PEM from the `linkerd-identity-trust-roots` ConfigMap
+2. Computes the SHA256 hash of the trust anchor
+3. Finds all Linkerd-injected Deployments, StatefulSets, and DaemonSets across all namespaces
+4. For each workload, checks if any pod's `linkerd.io/trust-root-sha256` annotation matches the current hash
+5. Restarts any workload where a pod has a mismatched or missing trust anchor hash
+
+> **Note:** The `linkerd` namespace is always processed first. This ensures the identity controller has the new trust anchor before data plane proxies restart, preventing TLS handshake failures.
 
 The CronJob is annotated with `linkerd.io/inject: disabled` so it doesn't depend on the very trust anchor it's refreshing.
 
@@ -63,7 +66,7 @@ helm install linkerd-trust-anchor-refresh \
 
 - Kubernetes 1.26+
 - Linkerd with trust anchor managed by cert-manager (or any automated rotation)
-- The CronJob's service account needs cluster-wide read access to namespaces, secrets, pods, and patch access to deployments, statefulsets, and daemonsets
+- The CronJob's service account needs cluster-wide read access to namespaces, configmaps, pods, replicasets, and patch access to deployments, statefulsets, and daemonsets
 
 ## License
 

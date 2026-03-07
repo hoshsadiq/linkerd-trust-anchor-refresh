@@ -8,43 +8,93 @@ tmp_files=()
 
 cleanup() {
   if ((${#tmp_files[@]} > 0)); then
-    rm -f "${tmp_files[@]}" 2>/dev/null || true
+    rm -f "${tmp_files[@]}" || true
   fi
 }
 
 trap cleanup EXIT
 
-date_to_epoch() {
-  if date --version >/dev/null 2>&1; then
-    date -d "$1" +%s
+echo "Checking if any pods need trust anchor refresh..."
+
+trust_anchor="$(kubectl get configmap linkerd-identity-trust-roots -n linkerd -o jsonpath='{.data.ca-bundle\.crt}' || true)"
+if [[ -z "$trust_anchor" ]]; then
+  echo "ERROR: Could not read ca-bundle.crt from configmap linkerd-identity-trust-roots in namespace linkerd (not found or empty)"
+  exit 1
+fi
+
+current_hash="$(printf '%s' "$trust_anchor" | sha256sum | awk '{print $1}')"
+echo "Current trust anchor hash: $current_hash"
+
+check_and_restart_workload() {
+  local kind="$1" ns="$2" name="$3" pods_file="$4" rs_file="$5"
+  local output needs_restart=false
+
+  case "$kind" in
+    Deployment)
+      output=$(jq -s -r \
+        --arg name "$name" \
+        --arg hash "$current_hash" \
+        '
+        .
+        | .[0].items as $pods
+        | .[1].items as $replicasets
+        | ( $replicasets
+          | map(select(any(.metadata.ownerReferences[]?; .kind=="Deployment" and .name==$name)))
+          | map(.metadata.name)
+          | map({key: ., value: true}) | from_entries
+        ) as $rs_set
+        | $pods
+        | select(any(.metadata.ownerReferences[]?; .kind=="ReplicaSet" and (.name | in($rs_set))))
+        | (.metadata.annotations["linkerd.io/trust-root-sha256"] // "") as $pod_hash
+        | if   $pod_hash == ""    then "WARN Pod \(.metadata.name) has no trust-root-sha256 annotation — skipping"
+          elif $pod_hash != $hash then "STALE Pod \(.metadata.name) hash \($pod_hash) != \($hash)"
+          else empty
+          end
+        ' "$pods_file" "$rs_file")
+      ;;
+    DaemonSet|StatefulSet)
+      output="$(jq -r \
+        --arg kind "$kind" \
+        --arg name "$name" \
+        --arg hash "$current_hash" \
+        '
+          .items[]
+          | select(any(.metadata.ownerReferences[]?; .kind==$kind and .name==$name))
+          | (.metadata.annotations["linkerd.io/trust-root-sha256"] // "") as $pod_hash
+          | if   $pod_hash == ""    then "WARN Pod \(.metadata.name) has no trust-root-sha256 annotation — skipping"
+            elif $pod_hash != $hash then "STALE Pod \(.metadata.name) hash \($pod_hash) != \($hash)"
+            else empty
+            end
+        ' "$pods_file"
+      )"
+      ;;
+    *)
+      echo "WARNING: unsupported kind '$kind' — skipping $name" >&2
+      return
+      ;;
+  esac
+
+  [[ -n "$output" ]] && echo "$output"
+
+  if grep -q '^STALE' <<< "$output"; then
+    needs_restart=true
+  fi
+
+  if [[ "$needs_restart" != true ]]; then
+    echo "Skipping $kind/$name (no pods with stale trust anchor)"
     return
   fi
 
-  date -j -f "%b %e %H:%M:%S %Y %Z" "$1" "+%s"
+  echo "Restarting $kind/$name"
+  kubectl rollout restart "${kind,,}" "$name" -n "$ns"
+  kubectl rollout status "${kind,,}" "$name" -n "$ns" --timeout="${ROLLOUT_TIMEOUT_MINUTES}m" || true
 }
-
-echo "Checking if any pods need trust anchor refresh..."
-
-cert_data="$(kubectl get secret linkerd-identity-issuer -n linkerd -o jsonpath='{.data.tls\.crt}')"
-cert_not_before="$(base64 -d <<< "$cert_data" | openssl x509 -noout -startdate | cut -d= -f2)"
-cert_epoch="$(date_to_epoch "$cert_not_before")"
-
-echo "Certificate issued at: $cert_not_before (epoch: $cert_epoch)"
-
-echo "=== Restarting Linkerd control plane ==="
-while read -r deploy; do
-  [[ -z "$deploy" ]] && continue
-  echo "Restarting linkerd deployment: $deploy"
-  kubectl rollout restart deployment "$deploy" -n linkerd
-  kubectl rollout status deployment "$deploy" -n linkerd --timeout="${ROLLOUT_TIMEOUT_MINUTES}m" || true
-done < <(kubectl get deploy -n linkerd -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
-
-echo "=== Restarting data plane ==="
 
 current_ns=""
 pods_file=""
 rs_file=""
 
+echo "Checking the cluster for stale trust anchors"
 while read -r kind ns name; do
   if [[ "$ns" != "$current_ns" ]]; then
     if [[ -n "$current_ns" ]]; then
@@ -52,7 +102,7 @@ while read -r kind ns name; do
       sleep "${STAGGER_DELAY_SECONDS}"
     fi
     current_ns="$ns"
-    echo "--- Namespace: $ns ---"
+    echo "> Namespace: $ns"
     pods_file="$(mktemp)"
     rs_file="$(mktemp)"
     tmp_files+=("$pods_file" "$rs_file")
@@ -60,71 +110,38 @@ while read -r kind ns name; do
     kubectl get rs -n "$ns" -o json >"$rs_file"
   fi
 
-  has_old_pods="false"
-  case "$kind" in
-    Deployment)
-      has_old_pods=$(
-        jq -s -r \
-          --arg deploy_name "$name" \
-          --argjson cert_epoch "$cert_epoch" \
-          '
-            {pods: .[0].items, replicasets: .[1].items} as $all
-            | ($all.replicasets
-                | map(select(any(.metadata.ownerReferences[]?; .kind=="Deployment" and .name==$deploy_name)))
-                | map(.metadata.name)
-              ) as $rs_names
-            | [$all.pods[]
-                | select(any(.metadata.ownerReferences[]?; .kind=="ReplicaSet" and (.metadata.ownerReferences[]?.name as $on | $rs_names | index($on))))
-                | select(.status.startTime? != null and (.status.startTime | fromdateiso8601) < $cert_epoch)
-              ] | length > 0
-          ' "$pods_file" "$rs_file"
-      )
-      ;;
-    DaemonSet|StatefulSet)
-      has_old_pods=$(
-        jq -r \
-          --arg kind "$kind" \
-          --arg name "$name" \
-          --argjson cert_epoch "$cert_epoch" \
-          '
-            [.items[]
-              | select(any(.metadata.ownerReferences[]?; .kind==$kind and .name==$name))
-              | select(.status.startTime? != null and (.status.startTime | fromdateiso8601) < $cert_epoch)
-            ] | length > 0
-          ' "$pods_file"
-      )
-      ;;
-  esac
-
-  if [[ "$has_old_pods" != "true" ]]; then
-    echo "Skipping $kind/$name (no pods with stale trust anchor)"
-    continue
-  fi
-
-  echo "Restarting $kind/$name"
-  kubectl rollout restart "${kind,,}" "$name" -n "$ns"
-  kubectl rollout status "${kind,,}" "$name" -n "$ns" --timeout="${ROLLOUT_TIMEOUT_MINUTES}m" || true
+  check_and_restart_workload "$kind" "$ns" "$name" "$pods_file" "$rs_file"
 done < <(
+  # This gets a list of all workloads in the cluster in the format of:
+  # [kind] [namespace] [name]
+  # The result is sorted so that workloads of linkerd is at the top
+  # so that linkerd workloads are restarted prior the rest of the workloads.
   kubectl get ns,deploy,statefulset,daemonset -A -o json |
     jq -r '
+      # Build a lookup of namespace -> linkerd inject annotation value
       ( .items
-        | map(select(.kind=="Namespace"))
+        | map(select(.kind == "Namespace"))
         | map({key: .metadata.name, value: (.metadata.annotations["linkerd.io/inject"] // "")})
         | from_entries
       ) as $ns_inject
-      |
-      .items[]
-      | select(.kind != "Namespace")
-      | select(
-          .spec.template.metadata.annotations["linkerd.io/inject"] == "enabled"
-          or (
-            (.spec.template.metadata.annotations["linkerd.io/inject"] // "") != "disabled"
-            and ($ns_inject[.metadata.namespace] // "") == "enabled"
-          )
-        )
-      | "\(.kind) \(.metadata.namespace) \(.metadata.name)"
-    ' |
-    sort -u
+
+      | [ .items[]
+          | select(.kind != "Namespace")
+          | (.spec.template.metadata.annotations["linkerd.io/inject"] // "") as $inject
+
+          # Include workload if explicitly enabled, or if namespace is enabled and not explicitly disabled
+          | select(
+              $inject == "enabled"
+              or ($inject != "disabled" and ($ns_inject[.metadata.namespace] // "") == "enabled")
+            )
+          | {kind, ns: .metadata.namespace, name: .metadata.name}
+        ]
+
+      # Sort with linkerd namespace first (in jq false < true), then by ns/kind/name
+      | sort_by([(.ns != "linkerd"), .ns, .kind, .name])
+      | .[]
+      | "\(.kind) \(.ns) \(.name)"
+    '
 )
 
-echo "=== Trust anchor refresh complete ==="
+echo "Trust anchor refresh complete"

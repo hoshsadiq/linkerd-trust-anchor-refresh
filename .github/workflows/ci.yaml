@@ -19,6 +19,17 @@ jobs:
       - name: Lint chart
         run: helm lint charts/linkerd-trust-anchor-refresh
 
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: scripts
+
   build-docker:
     runs-on: ubuntu-latest
     steps:
