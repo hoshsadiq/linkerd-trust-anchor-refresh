@@ -130,4 +130,5 @@ jobs:
             --token "${{ secrets.GITHUB_TOKEN }}" \
             --index-path ./index.yaml \
             --package-path .cr-release-packages \
+            --release-name-template "v{{ .Version }}" \
             --push
