@@ -2,29 +2,43 @@ name: Release
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "charts/**"
-      - "Dockerfile"
-      - "scripts/**"
+    tags:
+      - "v*"
 
 permissions:
   contents: write
   packages: write
-  id-token: write
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  release-docker:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install yq
+        uses: mikefarah/yq/.github/actions/install@master
+
+      - name: Patch Chart.yaml and values.yaml
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/bump-version.sh "$VERSION"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Get repo name
+        id: repo
+        run: |
+          echo "name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"   
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -33,80 +47,82 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from Chart.yaml
-        id: chart_version
-        run: |
-          VERSION=$(grep '^appVersion:' charts/linkerd-trust-anchor-refresh/Chart.yaml | awk '{print $2}' | tr -d '"')
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Lowercase owner
-        id: owner
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      - name: Docker metadata
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.owner }}/linkerd-trust-anchor-refresh
+          images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/${{ steps.repo.outputs.name }}
           tags: |
-            type=raw,value=${{ steps.chart_version.outputs.version }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             type=raw,value=latest
-            type=sha
 
-      - name: Build and push
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-  release-helm:
-    runs-on: ubuntu-latest
-    needs: release-docker
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
 
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1
-        with:
-          charts_dir: charts
-          skip_existing: "true"
+      - name: Package Helm chart
         env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-
-  release-oci:
-    runs-on: ubuntu-latest
-    needs: release-docker
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-
-      - name: Lowercase owner
-        id: owner
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: helm package charts/${{ steps.repo.outputs.name }} --version $VERSION --app-version $VERSION
 
       - name: Log in to GHCR (Helm)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
-      - name: Package chart
-        run: helm package charts/linkerd-trust-anchor-refresh
+      - name: Push Helm chart to OCI
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: helm push ${{ steps.repo.outputs.name }}-$VERSION.tgz oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/charts
 
-      - name: Push to OCI
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          append_body: true
+          files: "*.tgz"
+          body: |
+            ## Installation
+
+            **Docker**
+            ```sh
+            docker pull ${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/${{ steps.repo.outputs.name }}:${{ steps.version.outputs.version }}
+            ```
+
+            **Helm (OCI)**
+            ```sh
+            helm install my-release \
+              oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/charts/${{ steps.repo.outputs.name }} \
+              --version ${{ steps.version.outputs.version }}
+            ```
+
+            **Helm (GitHub Pages)**
+            ```sh
+            helm repo add ${{ steps.repo.outputs.name }} https://${{ steps.repo.outputs.owner }}.github.io/${{ steps.repo.outputs.name }}
+            helm install my-release ${{ steps.repo.outputs.name }}/${{ steps.repo.outputs.name }} \
+              --version ${{ steps.version.outputs.version }}
+            ```
+
+      - name: Install chart-releaser
         run: |
-          PKG=$(ls linkerd-trust-anchor-refresh-*.tgz)
-          helm push "$PKG" oci://${{ env.REGISTRY }}/${{ steps.owner.outputs.owner }}/charts
+          curl -sSLo cr.tar.gz "https://github.com/helm/chart-releaser/releases/latest/download/chart-releaser_linux_amd64.tar.gz"
+          tar -xzf cr.tar.gz cr
+          sudo mv cr /usr/local/bin/cr
+
+      - name: Update Helm chart index on GitHub Pages
+        run: |
+          mkdir -p .cr-release-packages
+          cp ${{ steps.repo.outputs.name }}-${{ steps.version.outputs.version }}.tgz .cr-release-packages/
+          cr index \
+            --owner "${{ steps.repo.outputs.owner }}" \
+            --git-repo "${{ steps.repo.outputs.name }}" \
+            --token "${{ secrets.GITHUB_TOKEN }}" \
+            --index-path ./index.yaml \
+            --package-path .cr-release-packages \
+            --push
