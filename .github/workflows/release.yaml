@@ -121,6 +121,7 @@ jobs:
 
       - name: Update Helm chart index on GitHub Pages
         run: |
+          git fetch origin gh-pages
           mkdir -p .cr-release-packages
           cp ${{ steps.repo.outputs.name }}-${{ steps.version.outputs.version }}.tgz .cr-release-packages/
           cr index \
